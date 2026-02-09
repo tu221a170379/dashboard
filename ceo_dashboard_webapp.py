@@ -8,7 +8,6 @@
 """
 
 import os
-import calendar
 import warnings
 import numpy as np
 import pandas as pd
@@ -17,8 +16,15 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 from datetime import datetime
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.stattools import adfuller
+
+# Import calculation engine functions
+from calculation_engine import (
+    format_vnd,
+    calculate_growth_percentage,
+    forecast_total_revenue,
+    forecast_products_revenue,
+    analyze_current_month,
+)
 
 warnings.filterwarnings('ignore')
 
@@ -159,288 +165,28 @@ def load_all_data():
 # ═══════════════════════════════════════════════════════════════
 # ANALYTICS FUNCTIONS
 # ═══════════════════════════════════════════════════════════════
-def fmt_vnd(n):
-    """Format VND number to readable string."""
-    if n is None or pd.isna(n):
-        return "-"
-    if abs(n) >= 1e9:
-        return f"{n/1e9:,.1f} Tỷ"
-    if abs(n) >= 1e6:
-        return f"{n/1e6:,.0f} Tr"
-    return f"{n:,.0f}"
-
-
-def growth_pct(cur, prev):
-    if prev and prev != 0:
-        return round((cur - prev) / prev * 100, 2)
-    return None
-
+# Note: Core calculation functions moved to calculation_engine.py
+# Keeping wrapper functions here for Streamlit caching
 
 @st.cache_data(ttl=3600, show_spinner="🔮 Đang chạy ARIMA tổng doanh thu...")
 def run_arima_total(df_serialized, periods=6):
+    """Wrapper for ARIMA total revenue forecasting with Streamlit caching."""
     df = pd.DataFrame(df_serialized)
-    df['NgayHoaDon'] = pd.to_datetime(df['NgayHoaDon'])
-    ts = df.groupby(df['NgayHoaDon'].dt.to_period('M'))['ThanhTienSauVAT'].sum()
-    ts.index = ts.index.to_timestamp()
-    ts = ts.sort_index().asfreq('MS', fill_value=0)
-
-    adf = adfuller(ts.dropna())
-    best_aic, best_order = np.inf, (1, 1, 1)
-    for p in range(0, 4):
-        for d in range(0, 3):
-            for q in range(0, 4):
-                try:
-                    r = ARIMA(ts, order=(p, d, q)).fit()
-                    if r.aic < best_aic:
-                        best_aic, best_order = r.aic, (p, d, q)
-                except:
-                    pass
-
-    model = ARIMA(ts, order=best_order).fit()
-    fc = model.get_forecast(steps=periods)
-    ci = fc.conf_int()
-
-    return {
-        'hist_dates': [d.strftime('%m/%Y') for d in ts.index],
-        'hist_values': [float(v) for v in ts.values],
-        'fc_dates': [d.strftime('%m/%Y') for d in fc.predicted_mean.index],
-        'fc_values': [float(v) for v in fc.predicted_mean.values],
-        'fc_lower': [float(v) for v in ci.iloc[:, 0].values],
-        'fc_upper': [float(v) for v in ci.iloc[:, 1].values],
-        'order': best_order,
-        'aic': round(best_aic, 2),
-        'adf_stat': round(float(adf[0]), 4),
-        'adf_pvalue': round(float(adf[1]), 4),
-    }
+    return forecast_total_revenue(df, periods=periods)
 
 
 @st.cache_data(ttl=3600, show_spinner="🔮 Đang chạy ARIMA sản phẩm...")
 def run_arima_products(df_serialized, top_n=10, periods=6):
+    """Wrapper for ARIMA products forecasting with Streamlit caching."""
     df = pd.DataFrame(df_serialized)
-    df['NgayHoaDon'] = pd.to_datetime(df['NgayHoaDon'])
-    top_names = df.groupby('TenSanPham')['ThanhTienSauVAT'].sum().nlargest(top_n).index.tolist()
-    results = []
-    for name in top_names:
-        try:
-            sub = df[df['TenSanPham'] == name]
-            ts = sub.groupby(sub['NgayHoaDon'].dt.to_period('M'))['ThanhTienSauVAT'].sum()
-            ts.index = ts.index.to_timestamp()
-            ts = ts.sort_index().asfreq('MS', fill_value=0)
-            if len(ts) < 12:
-                continue
-            best_aic, best_order = np.inf, (1, 1, 1)
-            for p in range(0, 3):
-                for d in range(0, 2):
-                    for q in range(0, 3):
-                        try:
-                            r = ARIMA(ts, order=(p, d, q)).fit()
-                            if r.aic < best_aic:
-                                best_aic, best_order = r.aic, (p, d, q)
-                        except:
-                            pass
-            model = ARIMA(ts, order=best_order).fit()
-            fc = model.get_forecast(steps=periods)
-            ci = fc.conf_int()
-            results.append({
-                'name': name,
-                'order': best_order,
-                'aic': round(best_aic, 2),
-                'hist_dates': [d.strftime('%m/%Y') for d in ts.index],
-                'hist_values': [float(v) for v in ts.values],
-                'fc_dates': [d.strftime('%m/%Y') for d in fc.predicted_mean.index],
-                'fc_values': [float(v) for v in fc.predicted_mean.values],
-                'fc_lower': [float(v) for v in ci.iloc[:, 0].values],
-                'fc_upper': [float(v) for v in ci.iloc[:, 1].values],
-            })
-        except:
-            pass
-    return results
+    return forecast_products_revenue(df, top_n=top_n, periods=periods)
 
 
 @st.cache_data(ttl=1800, show_spinner="📅 Phân tích tháng hiện tại...")
 def compute_current_month(df_serialized):
+    """Wrapper for current month analysis with Streamlit caching."""
     df = pd.DataFrame(df_serialized)
-    df['NgayHoaDon'] = pd.to_datetime(df['NgayHoaDon'])
-    df['Nam'] = df['NgayHoaDon'].dt.year
-    df['Thang_Num'] = df['NgayHoaDon'].dt.month
-
-    today = datetime.now()
-    cur_year, cur_month = today.year, today.month
-    days_in_month = calendar.monthrange(cur_year, cur_month)[1]
-
-    df_cur = df[(df['Nam'] == cur_year) & (df['Thang_Num'] == cur_month)].copy()
-
-    prev_month, prev_year = (12, cur_year - 1) if cur_month == 1 else (cur_month - 1, cur_year)
-    df_prev = df[(df['Nam'] == prev_year) & (df['Thang_Num'] == prev_month)]
-    df_yoy = df[(df['Nam'] == cur_year - 1) & (df['Thang_Num'] == cur_month)]
-
-    def sum_rev(d): return float(d['ThanhTienSauVAT'].sum()) if not d.empty else 0
-    def sum_qty(d): return int(d['SoLuong'].sum()) if not d.empty else 0
-    def cnt_inv(d): return int(d['SoHoaDon'].nunique()) if not d.empty and 'SoHoaDon' in d.columns else 0
-    def cnt_cust(d): return int(d['TenKhachHang'].nunique()) if not d.empty and 'TenKhachHang' in d.columns else 0
-
-    rev_cur, rev_prev, rev_yoy = sum_rev(df_cur), sum_rev(df_prev), sum_rev(df_yoy)
-    qty_cur, qty_prev = sum_qty(df_cur), sum_qty(df_prev)
-
-    # Daily actual
-    if not df_cur.empty:
-        df_cur['Ngay'] = df_cur['NgayHoaDon'].dt.day
-        daily_agg = df_cur.groupby('Ngay').agg(
-            revenue=('ThanhTienSauVAT', 'sum'),
-            quantity=('SoLuong', 'sum'),
-            invoices=('SoHoaDon', 'nunique'),
-            customers=('TenKhachHang', 'nunique')
-        ).reset_index().sort_values('Ngay')
-    else:
-        daily_agg = pd.DataFrame(columns=['Ngay', 'revenue', 'quantity', 'invoices', 'customers'])
-
-    last_actual_day = int(daily_agg['Ngay'].max()) if not daily_agg.empty else 0
-    forecast_days = list(range(last_actual_day + 1, days_in_month + 1))
-
-    # === DAILY FORECAST ===
-    daily_forecast = {}
-    if forecast_days and not daily_agg.empty:
-        # Historical weighted average
-        hist_daily = {}
-        df_hist = df[(df['Thang_Num'] == cur_month) & (df['Nam'] < cur_year)].copy()
-        if not df_hist.empty:
-            df_hist['Ngay'] = df_hist['NgayHoaDon'].dt.day
-            past_years = sorted(df_hist['Nam'].unique())
-            hbd = df_hist.groupby(['Nam', 'Ngay'])['ThanhTienSauVAT'].sum().reset_index()
-            for day in forecast_days:
-                dd = hbd[hbd['Ngay'] == day]
-                if not dd.empty:
-                    ws = [1 + (y - past_years[0]) for y in dd['Nam']]
-                    hist_daily[day] = float(np.average(dd['ThanhTienSauVAT'], weights=ws))
-
-        recent_avg = float(daily_agg['revenue'].tail(7).mean()) if len(daily_agg) >= 3 else float(daily_agg['revenue'].mean())
-
-        # ARIMA on daily series
-        arima_fc = {}
-        if len(daily_agg) >= 7:
-            try:
-                ts = daily_agg.set_index('Ngay')['revenue']
-                ts.index = pd.RangeIndex(start=1, stop=len(ts) + 1)
-                best_aic, best_order = np.inf, (1, 0, 0)
-                for p in range(0, 3):
-                    for d in range(0, 2):
-                        for q in range(0, 3):
-                            try:
-                                r = ARIMA(ts, order=(p, d, q)).fit()
-                                if r.aic < best_aic:
-                                    best_aic, best_order = r.aic, (p, d, q)
-                            except:
-                                pass
-                model = ARIMA(ts, order=best_order).fit()
-                fc = model.get_forecast(steps=len(forecast_days))
-                fc_ci = fc.conf_int()
-                for i, day in enumerate(forecast_days):
-                    arima_fc[day] = {
-                        'mean': max(float(fc.predicted_mean.iloc[i]), 0),
-                        'lower': max(float(fc_ci.iloc[i, 0]), 0),
-                        'upper': float(fc_ci.iloc[i, 1])
-                    }
-            except:
-                pass
-
-        # Combine methods
-        for day in forecast_days:
-            estimates, weights = [], []
-            if day in hist_daily and hist_daily[day] > 0:
-                estimates.append(hist_daily[day]); weights.append(0.3)
-            estimates.append(recent_avg); weights.append(0.3)
-            if day in arima_fc:
-                estimates.append(arima_fc[day]['mean']); weights.append(0.4)
-            val = float(np.average(estimates, weights=weights[:len(estimates)]))
-            lo = arima_fc[day]['lower'] if day in arima_fc else val * 0.75
-            hi = arima_fc[day]['upper'] if day in arima_fc else val * 1.25
-            daily_forecast[day] = {'value': round(val), 'lower': round(max(lo, 0)), 'upper': round(hi)}
-
-    # Build full daily arrays
-    days_labels = list(range(1, days_in_month + 1))
-    actual_values, forecast_values, forecast_lower, forecast_upper = [], [], [], []
-    cumulative = []
-    running = 0
-    actual_map = {int(r['Ngay']): float(r['revenue']) for _, r in daily_agg.iterrows()} if not daily_agg.empty else {}
-
-    for day in days_labels:
-        if day in actual_map:
-            actual_values.append(actual_map[day])
-            forecast_values.append(None)
-            forecast_lower.append(None)
-            forecast_upper.append(None)
-            running += actual_map[day]
-        elif day in daily_forecast:
-            actual_values.append(None)
-            forecast_values.append(daily_forecast[day]['value'])
-            forecast_lower.append(daily_forecast[day]['lower'])
-            forecast_upper.append(daily_forecast[day]['upper'])
-            running += daily_forecast[day]['value']
-        else:
-            actual_values.append(None)
-            forecast_values.append(None)
-            forecast_lower.append(None)
-            forecast_upper.append(None)
-        cumulative.append(running)
-
-    forecast_total = sum(v['value'] for v in daily_forecast.values())
-    projected_month = rev_cur + forecast_total
-
-    # Top SP, KH, Channels
-    top_sp, top_kh, month_channels = [], [], []
-    if not df_cur.empty:
-        sp_agg = df_cur.groupby('TenSanPham').agg(
-            revenue=('ThanhTienSauVAT', 'sum'), quantity=('SoLuong', 'sum'),
-            invoices=('SoHoaDon', 'nunique')
-        ).reset_index().sort_values('revenue', ascending=False).head(10)
-        total_sp = sp_agg['revenue'].sum()
-        for _, r in sp_agg.iterrows():
-            top_sp.append({'name': r['TenSanPham'], 'revenue': float(r['revenue']),
-                           'quantity': int(r['quantity']), 'invoices': int(r['invoices']),
-                           'pct': round(float(r['revenue']) / total_sp * 100, 1) if total_sp > 0 else 0})
-
-        if 'TenKhachHang' in df_cur.columns:
-            kh_agg = df_cur.groupby('TenKhachHang').agg(
-                revenue=('ThanhTienSauVAT', 'sum'), quantity=('SoLuong', 'sum'),
-                invoices=('SoHoaDon', 'nunique')
-            ).reset_index().sort_values('revenue', ascending=False).head(10)
-            for _, r in kh_agg.iterrows():
-                top_kh.append({'name': r['TenKhachHang'], 'revenue': float(r['revenue']),
-                               'quantity': int(r['quantity']), 'invoices': int(r['invoices'])})
-
-        if 'KenhBanHang' in df_cur.columns:
-            ch_agg = df_cur.groupby('KenhBanHang')['ThanhTienSauVAT'].sum().reset_index().sort_values('ThanhTienSauVAT', ascending=False)
-            ch_total = ch_agg['ThanhTienSauVAT'].sum()
-            for _, r in ch_agg.iterrows():
-                month_channels.append({'name': r['KenhBanHang'], 'revenue': float(r['ThanhTienSauVAT']),
-                                       'pct': round(float(r['ThanhTienSauVAT']) / ch_total * 100, 1) if ch_total > 0 else 0})
-
-    return {
-        'month_label': f"{cur_month:02d}/{cur_year}",
-        'days_in_month': days_in_month,
-        'last_actual_day': last_actual_day,
-        'forecast_days_count': len(forecast_days),
-        'rev_cur': rev_cur, 'rev_prev': rev_prev, 'rev_yoy': rev_yoy,
-        'qty_cur': qty_cur, 'qty_prev': qty_prev,
-        'growth_prev': growth_pct(rev_cur, rev_prev),
-        'growth_yoy': growth_pct(rev_cur, rev_yoy),
-        'invoices': cnt_inv(df_cur),
-        'customers': cnt_cust(df_cur),
-        'avg_daily': round(rev_cur / max(last_actual_day, 1)),
-        'forecast_total': forecast_total,
-        'projected_month': projected_month,
-        'daily': {
-            'labels': days_labels,
-            'actual': actual_values,
-            'forecast': forecast_values,
-            'forecast_lower': forecast_lower,
-            'forecast_upper': forecast_upper,
-            'cumulative': cumulative,
-        },
-        'top_products': top_sp,
-        'top_customers': top_kh,
-        'channels': month_channels,
-    }
+    return analyze_current_month(df)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -458,7 +204,7 @@ def render_overview(df):
 
     # KPI row
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("💰 Tổng Doanh Thu", fmt_vnd(total_rev))
+    c1.metric("💰 Tổng Doanh Thu", format_vnd(total_rev))
     c2.metric("📦 Tổng Số Lượng", f"{total_qty:,}")
     c3.metric("👥 Tổng Khách Hàng", f"{total_cust:,}")
     c4.metric("🏭 Tổng Sản Phẩm", f"{total_prod:,}")
@@ -475,7 +221,7 @@ def render_overview(df):
         delta = None
         if i > 0 and yearly[yrs[i - 1]] > 0:
             delta = f"{(yearly[yr] - yearly[yrs[i-1]]) / yearly[yrs[i-1]] * 100:.1f}%"
-        yr_cols[i].metric(f"📅 Doanh Thu {int(yr)}", fmt_vnd(yearly[yr]), delta=delta)
+        yr_cols[i].metric(f"📅 Doanh Thu {int(yr)}", format_vnd(yearly[yr]), delta=delta)
 
     # Charts
     st.markdown("---")
@@ -486,7 +232,7 @@ def render_overview(df):
             x=[str(int(y)) for y in yrs],
             y=[yearly[y] for y in yrs],
             marker_color=COLORS[:len(yrs)],
-            text=[fmt_vnd(yearly[y]) for y in yrs],
+            text=[format_vnd(yearly[y]) for y in yrs],
             textposition='outside',
         ))
         fig.update_layout(title="📊 Doanh Thu Theo Năm", yaxis_title="VNĐ",
@@ -531,7 +277,7 @@ def render_monthly(df):
         line=dict(color='#2E86C1', width=2.5),
         fill='tozeroy', fillcolor='rgba(46,134,193,0.1)',
         hovertemplate='%{x}: %{customdata}<extra></extra>',
-        customdata=[fmt_vnd(v) for v in monthly['revenue']],
+        customdata=[format_vnd(v) for v in monthly['revenue']],
     ))
     fig.update_layout(title="📅 Xu Hướng Doanh Thu Theo Tháng", yaxis_title="VNĐ",
                       template="plotly_white", height=450)
@@ -558,7 +304,7 @@ def render_monthly(df):
     with st.expander("📋 Bảng Chi Tiết Doanh Thu Tháng", expanded=False):
         display_df = monthly[['label', 'revenue', 'quantity', 'invoices', 'customers']].copy()
         display_df.columns = ['Tháng', 'Doanh Thu', 'Số Lượng', 'Số HĐ', 'Số KH']
-        display_df['Doanh Thu'] = display_df['Doanh Thu'].apply(fmt_vnd)
+        display_df['Doanh Thu'] = display_df['Doanh Thu'].apply(format_vnd)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
@@ -573,7 +319,7 @@ def render_quarterly(df):
     fig = go.Figure(go.Bar(
         x=quarterly['label'], y=quarterly['revenue'],
         marker_color=[COLORS[i % len(COLORS)] for i in range(len(quarterly))],
-        text=[fmt_vnd(v) for v in quarterly['revenue']],
+        text=[format_vnd(v) for v in quarterly['revenue']],
         textposition='outside',
     ))
     fig.update_layout(title="📊 Doanh Thu Theo Quý", yaxis_title="VNĐ",
@@ -599,7 +345,7 @@ def render_products(df):
         x=prod['revenue'].tolist()[::-1],
         orientation='h',
         marker_color='#F39C12',
-        text=[fmt_vnd(v) for v in prod['revenue'].tolist()[::-1]],
+        text=[format_vnd(v) for v in prod['revenue'].tolist()[::-1]],
         textposition='outside',
     ))
     fig.update_layout(title="🏆 Top 20 Sản Phẩm Doanh Thu Cao Nhất", xaxis_title="VNĐ",
@@ -627,7 +373,7 @@ def render_products(df):
     with st.expander("📋 Chi Tiết Top 20 Sản Phẩm", expanded=False):
         tbl = prod[['TenSanPham', 'revenue', 'quantity', 'invoices', 'customers', 'avg_price', 'pct']].copy()
         tbl.columns = ['Sản Phẩm', 'Doanh Thu', 'Số Lượng', 'Số HĐ', 'Số KH', 'Giá TB', 'Tỷ Lệ %']
-        tbl['Doanh Thu'] = tbl['Doanh Thu'].apply(fmt_vnd)
+        tbl['Doanh Thu'] = tbl['Doanh Thu'].apply(format_vnd)
         tbl['Giá TB'] = tbl['Giá TB'].apply(lambda x: f"{x:,.0f}")
         tbl.index = range(1, len(tbl) + 1)
         st.dataframe(tbl, use_container_width=True)
@@ -653,7 +399,7 @@ def render_regional(df):
             hole=0.45, marker_colors=COLORS,
             textinfo='label+percent',
             hovertemplate='%{label}: %{customdata}<extra></extra>',
-            customdata=[fmt_vnd(v) for v in reg['revenue']],
+            customdata=[format_vnd(v) for v in reg['revenue']],
         ))
         fig.update_layout(title="🗺️ Doanh Thu Theo Vùng", template="plotly_white", height=450)
         st.plotly_chart(fig, use_container_width=True)
@@ -668,7 +414,7 @@ def render_regional(df):
                 y=prov['TinhThanh'].tolist()[::-1],
                 x=prov['revenue'].tolist()[::-1],
                 orientation='h', marker_color='#E74C3C',
-                text=[fmt_vnd(v) for v in prov['revenue'].tolist()[::-1]],
+                text=[format_vnd(v) for v in prov['revenue'].tolist()[::-1]],
                 textposition='outside',
             ))
             fig.update_layout(title="🏙️ Top 15 Tỉnh Thành", xaxis_title="VNĐ",
@@ -731,7 +477,7 @@ def render_customers(df):
         y=cust['TenKhachHang'].tolist()[::-1],
         x=cust['revenue'].tolist()[::-1],
         orientation='h', marker_color='#D35400',
-        text=[fmt_vnd(v) for v in cust['revenue'].tolist()[::-1]],
+        text=[format_vnd(v) for v in cust['revenue'].tolist()[::-1]],
         textposition='outside',
     ))
     fig.update_layout(title="👥 Top 15 Khách Hàng Doanh Thu Cao Nhất", xaxis_title="VNĐ",
@@ -741,7 +487,7 @@ def render_customers(df):
     with st.expander("📋 Chi Tiết Top Khách Hàng", expanded=False):
         tbl = cust[['TenKhachHang', 'revenue', 'quantity', 'invoices']].copy()
         tbl.columns = ['Khách Hàng', 'Doanh Thu', 'Số Lượng', 'Số HĐ']
-        tbl['Doanh Thu'] = tbl['Doanh Thu'].apply(fmt_vnd)
+        tbl['Doanh Thu'] = tbl['Doanh Thu'].apply(format_vnd)
         tbl.index = range(1, len(tbl) + 1)
         st.dataframe(tbl, use_container_width=True)
 
@@ -785,9 +531,9 @@ def render_arima_total(df):
     with st.expander("📋 Bảng Số Liệu Dự Báo", expanded=True):
         fc_df = pd.DataFrame({
             'Tháng': arima['fc_dates'],
-            'Dự Báo': [fmt_vnd(v) for v in arima['fc_values']],
-            'Giới Hạn Dưới': [fmt_vnd(v) for v in arima['fc_lower']],
-            'Giới Hạn Trên': [fmt_vnd(v) for v in arima['fc_upper']],
+            'Dự Báo': [format_vnd(v) for v in arima['fc_values']],
+            'Giới Hạn Dưới': [format_vnd(v) for v in arima['fc_lower']],
+            'Giới Hạn Trên': [format_vnd(v) for v in arima['fc_upper']],
         })
         st.dataframe(fc_df, use_container_width=True, hide_index=True)
 
@@ -836,9 +582,9 @@ def render_arima_products(df):
                     'ARIMA': str(prod['order']),
                     'AIC': prod['aic'],
                     'Tháng': lbl,
-                    'Dự Báo': fmt_vnd(prod['fc_values'][j]),
-                    'CI Dưới': fmt_vnd(prod['fc_lower'][j]),
-                    'CI Trên': fmt_vnd(prod['fc_upper'][j]),
+                    'Dự Báo': format_vnd(prod['fc_values'][j]),
+                    'CI Dưới': format_vnd(prod['fc_lower'][j]),
+                    'CI Trên': format_vnd(prod['fc_upper'][j]),
                 })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -852,10 +598,10 @@ def render_current_month(df):
     st.markdown(f"### 📅 Báo Cáo Tháng {cm['month_label']} (Dữ liệu đến ngày {cm['last_actual_day']})")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric(f"💰 DT Tháng {cm['month_label']}", fmt_vnd(cm['rev_cur']),
+    c1.metric(f"💰 DT Tháng {cm['month_label']}", format_vnd(cm['rev_cur']),
               delta=f"{cm['growth_prev']:+.1f}% vs tháng trước" if cm['growth_prev'] is not None else None)
-    c2.metric("📊 DT Tháng Trước", fmt_vnd(cm['rev_prev']))
-    c3.metric("📊 DT Cùng Kỳ Năm Trước", fmt_vnd(cm['rev_yoy']),
+    c2.metric("📊 DT Tháng Trước", format_vnd(cm['rev_prev']))
+    c3.metric("📊 DT Cùng Kỳ Năm Trước", format_vnd(cm['rev_yoy']),
               delta=f"{cm['growth_yoy']:+.1f}% vs cùng kỳ" if cm['growth_yoy'] is not None else None)
 
     c4, c5, c6 = st.columns(3)
@@ -864,10 +610,10 @@ def render_current_month(df):
     c6.metric("👥 Số Khách Hàng", f"{cm['customers']:,}")
 
     c7, c8, c9 = st.columns(3)
-    c7.metric("📊 DT Trung Bình/Ngày", fmt_vnd(cm['avg_daily']))
-    c8.metric("🔮 DT Dự Báo Còn Lại", fmt_vnd(cm['forecast_total']),
+    c7.metric("📊 DT Trung Bình/Ngày", format_vnd(cm['avg_daily']))
+    c8.metric("🔮 DT Dự Báo Còn Lại", format_vnd(cm['forecast_total']),
               delta=f"{cm['forecast_days_count']} ngày còn lại", delta_color="off")
-    c9.metric("🎯 DT Dự Báo Cả Tháng", fmt_vnd(cm['projected_month']),
+    c9.metric("🎯 DT Dự Báo Cả Tháng", format_vnd(cm['projected_month']),
               delta="Thực tế + Dự báo", delta_color="off")
 
     st.markdown("---")
@@ -943,7 +689,7 @@ def render_current_month(df):
             fig = go.Figure(go.Bar(
                 y=sp_names[::-1], x=sp_rev[::-1], orientation='h',
                 marker_color='#E67E22',
-                text=[fmt_vnd(v) for v in sp_rev[::-1]], textposition='outside',
+                text=[format_vnd(v) for v in sp_rev[::-1]], textposition='outside',
             ))
             fig.update_layout(title="🏆 Top 10 Sản Phẩm Trong Tháng",
                               template="plotly_white", height=400, margin=dict(l=220))
@@ -968,7 +714,7 @@ def render_current_month(df):
             with st.expander("📋 Chi Tiết Top SP", expanded=True):
                 sp_df = pd.DataFrame(cm['top_products'])
                 sp_df.columns = ['Sản Phẩm', 'Doanh Thu', 'SL', 'HĐ', '%']
-                sp_df['Doanh Thu'] = sp_df['Doanh Thu'].apply(fmt_vnd)
+                sp_df['Doanh Thu'] = sp_df['Doanh Thu'].apply(format_vnd)
                 sp_df.index = range(1, len(sp_df) + 1)
                 st.dataframe(sp_df, use_container_width=True)
 
@@ -977,7 +723,7 @@ def render_current_month(df):
             with st.expander("📋 Chi Tiết Top KH", expanded=True):
                 kh_df = pd.DataFrame(cm['top_customers'])
                 kh_df.columns = ['Khách Hàng', 'Doanh Thu', 'SL', 'HĐ']
-                kh_df['Doanh Thu'] = kh_df['Doanh Thu'].apply(fmt_vnd)
+                kh_df['Doanh Thu'] = kh_df['Doanh Thu'].apply(format_vnd)
                 kh_df.index = range(1, len(kh_df) + 1)
                 st.dataframe(kh_df, use_container_width=True)
 
@@ -987,11 +733,11 @@ def render_current_month(df):
         for i, day in enumerate(d['labels']):
             daily_rows.append({
                 'Ngày': day,
-                'DT Thực Tế': fmt_vnd(d['actual'][i]) if d['actual'][i] is not None else '-',
-                'DT Dự Báo': fmt_vnd(d['forecast'][i]) if d['forecast'][i] is not None else '-',
-                'CI Dưới': fmt_vnd(d['forecast_lower'][i]) if d['forecast_lower'][i] is not None else '-',
-                'CI Trên': fmt_vnd(d['forecast_upper'][i]) if d['forecast_upper'][i] is not None else '-',
-                'Lũy Kế': fmt_vnd(d['cumulative'][i]),
+                'DT Thực Tế': format_vnd(d['actual'][i]) if d['actual'][i] is not None else '-',
+                'DT Dự Báo': format_vnd(d['forecast'][i]) if d['forecast'][i] is not None else '-',
+                'CI Dưới': format_vnd(d['forecast_lower'][i]) if d['forecast_lower'][i] is not None else '-',
+                'CI Trên': format_vnd(d['forecast_upper'][i]) if d['forecast_upper'][i] is not None else '-',
+                'Lũy Kế': format_vnd(d['cumulative'][i]),
                 'Loại': '🔮 Dự báo' if d['forecast'][i] is not None else '✅ Thực tế',
             })
         st.dataframe(pd.DataFrame(daily_rows), use_container_width=True, hide_index=True)
