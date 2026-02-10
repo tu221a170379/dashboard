@@ -3,22 +3,21 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 
 # IDE
 .vscode/
 .idea/
 
-# Output files (generated)
-CEO_Dashboard_VKD.xlsx
-CEO_Dashboard_Online.html
+# Cache (generated at runtime)
+data_cache/
 
 # OS
 Thumbs.db
 .DS_Store
 
-# Old scripts (not needed for web app)
-ceo_dashboard.py
-ceo_dashboard_online.py
-
-# Aggregated data (not needed)
+# Old output files
+CEO_Dashboard_VKD.xlsx
+CEO_Dashboard_Online.html
+arima_forecast_top20_monthly.xlsx
 all_sales_2023_2026.xlsx
